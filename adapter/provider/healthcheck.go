@@ -43,14 +43,14 @@ type HealthCheck struct {
 
 func (hc *HealthCheck) process() {
 	ticker := time.NewTicker(hc.interval)
-	go hc.check()
+	go hc.checkAutomatic()
 	for {
 		select {
 		case <-ticker.C:
 			lastTouch := hc.lastTouch.Load()
 			since := time.Since(lastTouch)
 			if !hc.lazy || since < hc.interval {
-				hc.check()
+				hc.checkAutomatic()
 			} else {
 				log.Debugln("Skip once health check because we are lazy")
 			}
@@ -121,6 +121,14 @@ func (hc *HealthCheck) touch() {
 }
 
 func (hc *HealthCheck) check() {
+	hc.checkWithCoalescing(false)
+}
+
+func (hc *HealthCheck) checkAutomatic() {
+	hc.checkWithCoalescing(true)
+}
+
+func (hc *HealthCheck) checkWithCoalescing(automatic bool) {
 	if len(hc.proxies) == 0 {
 		return
 	}
@@ -133,12 +141,12 @@ func (hc *HealthCheck) check() {
 
 		// execute default health check
 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
-		hc.execute(b, hc.url, id, option)
+		hc.execute(b, hc.url, id, option, automatic)
 
 		// execute extra health check
 		if len(hc.extra) != 0 {
 			for url, option := range hc.extra {
-				hc.execute(b, url, id, option)
+				hc.execute(b, url, id, option, automatic)
 			}
 		}
 		_ = b.Wait()
@@ -147,7 +155,7 @@ func (hc *HealthCheck) check() {
 	})
 }
 
-func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption) {
+func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption, automatic bool) {
 	url = strings.TrimSpace(url)
 	if len(url) == 0 {
 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
@@ -181,7 +189,11 @@ func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extra
 			ctx, cancel := context.WithTimeout(hc.ctx, hc.timeout)
 			defer cancel()
 			log.Debugln("Health Checking, proxy: %s, url: %s, id: {%s}", p.Name(), url, uid)
-			_, _ = p.URLTest(ctx, url, expectedStatus)
+			if automatic {
+				_, _ = automaticProbes.test(ctx, p, url, expectedStatus, hc.timeout)
+			} else {
+				_, _ = p.URLTest(ctx, url, expectedStatus)
+			}
 			log.Debugln("Health Checked, proxy: %s, url: %s, alive: %t, delay: %d ms uid: {%s}", p.Name(), url, p.AliveForTestUrl(url), p.LastDelayForTestUrl(url), uid)
 			return nil
 		})
